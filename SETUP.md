@@ -40,23 +40,44 @@ This installs the required packages:
 1. Open Telegram and search for **@BotFather**
 2. Send `/newbot` command
 3. Follow the prompts:
-   - Choose a name for your bot (e.g., "Rust WLED Trigger")
-   - Choose a username (must end in 'bot', e.g., "rust_wled_bot")
+   - Choose a name for your bot (e.g., "Rust LED Trigger")
+   - Choose a username (must end in 'bot', e.g., "rust_led_bot")
 4. BotFather will give you a **Bot Token** - save this! (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
 5. Copy the bot token
 
-### 2.2 Get Your Chat ID
+### 2.2 Create a Telegram Channel
 
+1. In Telegram, click the **New Message** button
+2. Select **New Channel**
+3. Choose a name (e.g., "Rust+ LED Notifications")
+4. Make it **Private** (recommended for security)
+5. Click **Create Channel**
+6. Skip adding subscribers for now
+
+### 2.3 Add Bots as Channel Administrators
+
+1. In your new channel, click the **channel name** at the top
+2. Click **Administrators**
+3. Click **Add Administrator**
+4. Search for and add **@IFTTT** bot
+5. Give it permissions to **Post Messages**
+6. Click **Save**
+7. Repeat steps 3-6 to add **your bot** (the one you created in step 2.1)
+8. Give your bot permissions to **Post Messages**
+
+### 2.4 Get Your Channel ID
+
+**Method 1 - Using @userinfobot (Recommended):**
 1. Search for **@userinfobot** on Telegram
-2. Start a chat with it
-3. It will reply with your **Chat ID** (a number like `123456789`)
-4. Save this Chat ID
+2. Forward any message from your channel to @userinfobot
+3. It will reply with channel information including the **Chat ID** (starts with -100, like `-1001234567890`)
+4. Save this Channel ID
 
-### 2.3 Start Your Bot
-
-1. Search for your bot username in Telegram (the one you created)
-2. Click **Start** or send `/start` to begin a conversation
-3. This authorizes the bot to send you messages
+**Method 2 - Using bot API:**
+1. Post a test message in your channel
+2. Visit: `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
+3. Look for `"chat":{"id":-100xxxxxxxxx}` in the response
+4. Save the ID (including the minus sign)
 
 ---
 
@@ -176,14 +197,18 @@ Philips Hue integration will be added in a future update. The framework is alrea
 
 1. Click **Then That**
 2. Search for and select **Telegram**
-3. Choose **Send message**
+3. Choose **Send message to channel**
 4. Configure:
+   - **Channel**: Select your newly created channel from the dropdown
    - **Message text**: `Rust+ Alert: {{Title}} - {{Body}}`
-   - **Target chat**: Use the chat with your bot
+   - **Photo URL**: (leave blank)
 5. Click **Create Action**
 6. Click **Continue** → **Finish**
 
-**Note**: You may need to connect IFTTT to your Telegram account and authorize it to send messages to your bot.
+**Important Notes**: 
+- Make sure you connected IFTTT to your Telegram account
+- Verify that @IFTTT bot is an administrator in your channel
+- The channel must allow posting from bots
 
 ### 5.3 Test the Applet
 
@@ -217,7 +242,7 @@ Philips Hue integration will be added in a future update. The framework is alrea
    
    **Telegram Settings:**
    - **Bot Token**: Paste the bot token from BotFather
-   - **Chat ID**: Paste your chat ID from @userinfobot
+   - **Chat ID**: Paste your channel ID from step 2.4 (starts with -100)
 
 4. In the **Control** tab, choose your action on trigger:
    
@@ -265,18 +290,21 @@ Double-click the `.vbs` file to run the app without a visible window.
 ## Troubleshooting
 
 ### "ERROR: Telegram bot token or chat ID not set!"
-- Make sure you've entered both the bot token and chat ID in the app
+- Make sure you've entered both the bot token and channel ID in the app
 - Verify you copied them correctly (no extra spaces)
+- Channel ID must start with -100 (e.g., -1001234567890)
 
 ### "Telegram error" messages
 - Verify your bot token is correct
-- Make sure you started a conversation with your bot in Telegram
-- Check that your chat ID is correct
+- Make sure your bot is an administrator in the channel
+- Make sure @IFTTT bot is also an administrator in the channel
+- Check that your channel ID is correct and starts with -100
 
 ### IFTTT applet not triggering
 - Check that your Rust+ alarm is properly configured in-game
 - Verify the IFTTT applet is enabled (toggle it off and on)
 - Make sure IFTTT is connected to your Telegram account
+- Verify @IFTTT bot has "Post Messages" permission in your channel
 - Check IFTTT activity log to see if the applet is running
 
 ### Govee API issues
