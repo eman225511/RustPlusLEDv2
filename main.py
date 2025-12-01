@@ -7,12 +7,14 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                                QRadioButton, QButtonGroup, QSpinBox, QFrame,
                                QDialog, QTextEdit, QColorDialog, QMessageBox,
-                               QTabWidget, QProgressBar, QToolTip)
+                               QTabWidget, QProgressBar, QToolTip, QComboBox,
+                               QGroupBox, QScrollArea)
 from PySide6.QtCore import Qt, Signal, QThread, QTimer, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QColor, QIcon
 from telegram import Bot
 from telegram.error import TelegramError
 import asyncio
+from led_controllers import create_led_controller, GoveeController
 
 CONFIG_FILE = "config.json"
 
@@ -196,25 +198,25 @@ This app monitors your Telegram channel for Rust+ messages and triggers WLED act
 When IFTTT sends Rust+ notifications to your channel, this app will detect them and 
 control your WLED lights automatically!
 
-1️⃣ CREATE YOUR TELEGRAM CHANNEL:
+1. CREATE YOUR TELEGRAM CHANNEL:
    • Open Telegram and create a new channel
    • Make it private (recommended for security)
    • Give it a name like "Rust+ Notifications"
 
-2️⃣ CREATE A BOT:
+2. CREATE A BOT:
    • Search for @BotFather on Telegram
    • Send /newbot command
    • Follow instructions to name your bot (e.g., "MyRustWLEDBot")
    • Copy the Bot Token (looks like: 123456789:ABCdefGHIjklMNOpqrsTUVwxyz)
    • Paste it in the 'Bot Token' field above
 
-3️⃣ ADD BOTS TO YOUR CHANNEL:
+3. ADD BOTS TO YOUR CHANNEL:
    • Go to your channel settings → Administrators → Add Administrator
    • Search and add your newly created bot (give it "Post Messages" permission)
    • Search and add @IFTTT bot (this sends Rust+ notifications)
    • Both bots must be channel admins!
 
-4️⃣ GET YOUR CHANNEL ID:
+4. GET YOUR CHANNEL ID:
    Method A - Using @userinfobot:
    • Forward any message from your channel to @userinfobot
    • It will show the channel ID (starts with -100, like: -1001234567890)
@@ -228,13 +230,13 @@ control your WLED lights automatically!
    • Visit: https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
    • Look for "chat":{"id":-100xxxxxxxxx}
 
-5️⃣ CONFIGURE IFTTT (IMPORTANT!):
+5. CONFIGURE IFTTT (IMPORTANT!):
    • Go to IFTTT.com and set up Rust+ integration
    • In the "Then" action, choose "Telegram" → "Send message to channel"
    • Set the channel to your newly created channel
    • Make sure IFTTT sends messages when Rust+ events occur
 
-6️⃣ TEST THE SETUP:
+6. TEST THE SETUP:
    • Paste your channel ID (starts with -100) in the 'Chat ID' field above
    • Click 'Save Settings' in the main window
    • Send a test message to your channel (or trigger a Rust+ event)
@@ -488,6 +490,9 @@ class RustWLEDApp(QMainWindow):
         self.create_main_tab()
         self.create_settings_tab()
         
+        # Connect LED type change to update action visibility (after both tabs are created)
+        self.led_type_group.buttonClicked.connect(self.update_action_visibility)
+        
         main_layout.addWidget(self.tab_widget)
         
         # Status label (outside tabs)
@@ -535,9 +540,9 @@ class RustWLEDApp(QMainWindow):
         """)
         save_btn.clicked.connect(self.save_config)
         
-        test_btn = QPushButton("🧪 Test WLED")
+        test_btn = QPushButton("🧪 Test LEDs")
         test_btn.setFont(QFont("Arial", 14, QFont.Bold))
-        test_btn.setToolTip("Test the current WLED configuration")
+        test_btn.setToolTip("Test the current LED configuration")
         test_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
@@ -594,17 +599,21 @@ class RustWLEDApp(QMainWindow):
         self.radio_on = QRadioButton("💡 Turn ON")
         self.radio_off = QRadioButton("🌙 Turn OFF")
         self.radio_color = QRadioButton("🎨 Set Color")
-        self.radio_effect = QRadioButton("✨ Set Effect")
-        self.radio_preset = QRadioButton("🎭 Run Preset")
+        self.radio_effect = QRadioButton("✨ Set Effect (WLED)")
+        self.radio_preset = QRadioButton("🎭 Run Preset (WLED)")
+        self.radio_scene = QRadioButton("🎪 Run Scene (Govee)")
+        self.radio_brightness = QRadioButton("☀️ Set Brightness (Govee/Hue)")
         
-        for i, radio in enumerate([self.radio_on, self.radio_off, self.radio_color, self.radio_effect, self.radio_preset]):
+        for i, radio in enumerate([self.radio_on, self.radio_off, self.radio_color, 
+                                   self.radio_effect, self.radio_preset, self.radio_scene,
+                                   self.radio_brightness]):
             radio.setFont(QFont("Arial", 14, QFont.Bold))
             radio.setStyleSheet("color: #ffffff; font-weight: bold;")
             self.action_group.addButton(radio, i)
             actions_layout.addWidget(radio)
         
         # Set current action
-        action_map = {"on": 0, "off": 1, "color": 2, "effect": 3, "preset": 4}
+        action_map = {"on": 0, "off": 1, "color": 2, "effect": 3, "preset": 4, "scene": 5, "brightness": 6}
         self.action_group.button(action_map.get(self.config["action"], 0)).setChecked(True)
         
         layout.addLayout(actions_layout)
@@ -640,9 +649,11 @@ class RustWLEDApp(QMainWindow):
         color_layout.addStretch()
         layout.addLayout(color_layout)
         
-        # Effect and Preset
-        params_layout = QHBoxLayout()
+        # Effect, Preset, Scene, and Brightness
+        params_layout = QVBoxLayout()
         
+        # First row: Effect and Preset (WLED)
+        wled_row = QHBoxLayout()
         effect_label = QLabel("✨ Effect #:")
         effect_label.setFont(QFont("Arial", 14, QFont.Bold))
         effect_label.setStyleSheet("color: #ffffff; padding: 5px;")
@@ -659,12 +670,41 @@ class RustWLEDApp(QMainWindow):
         self.preset_spin.setValue(int(self.config.get("preset", 0)))
         self.preset_spin.setFont(QFont("Arial", 14))
         
-        params_layout.addWidget(effect_label)
-        params_layout.addWidget(self.effect_spin)
-        params_layout.addSpacing(30)
-        params_layout.addWidget(preset_label)
-        params_layout.addWidget(self.preset_spin)
-        params_layout.addStretch()
+        wled_row.addWidget(effect_label)
+        wled_row.addWidget(self.effect_spin)
+        wled_row.addSpacing(30)
+        wled_row.addWidget(preset_label)
+        wled_row.addWidget(self.preset_spin)
+        wled_row.addStretch()
+        
+        # Second row: Scene and Brightness (Govee/Hue)
+        govee_row = QHBoxLayout()
+        scene_label = QLabel("🎪 Scene #:")
+        scene_label.setFont(QFont("Arial", 14, QFont.Bold))
+        scene_label.setStyleSheet("color: #ffffff; padding: 5px;")
+        self.scene_spin = QSpinBox()
+        self.scene_spin.setRange(0, 50)  # Govee typically has limited scenes
+        self.scene_spin.setValue(int(self.config.get("scene", 0)))
+        self.scene_spin.setFont(QFont("Arial", 14))
+        
+        brightness_label = QLabel("☀️ Brightness:")
+        brightness_label.setFont(QFont("Arial", 14, QFont.Bold))
+        brightness_label.setStyleSheet("color: #ffffff; padding: 5px;")
+        self.brightness_spin = QSpinBox()
+        self.brightness_spin.setRange(1, 100)
+        self.brightness_spin.setValue(int(self.config.get("brightness", 100)))
+        self.brightness_spin.setFont(QFont("Arial", 14))
+        self.brightness_spin.setSuffix("%")
+        
+        govee_row.addWidget(scene_label)
+        govee_row.addWidget(self.scene_spin)
+        govee_row.addSpacing(30)
+        govee_row.addWidget(brightness_label)
+        govee_row.addWidget(self.brightness_spin)
+        govee_row.addStretch()
+        
+        params_layout.addLayout(wled_row)
+        params_layout.addLayout(govee_row)
         layout.addLayout(params_layout)
         
         layout.addStretch()
@@ -674,50 +714,200 @@ class RustWLEDApp(QMainWindow):
     def create_settings_tab(self):
         """Create the settings tab"""
         settings_tab = QWidget()
+        
+        # Create scroll area for settings
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollBar:vertical {
+                background-color: #2b2b2b;
+                width: 12px;
+                border-radius: 6px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #606060;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+        """)
+        
+        content_widget = QWidget()
         layout = QVBoxLayout()
-        layout.setSpacing(15)
+        layout.setSpacing(20)
         layout.setContentsMargins(20, 20, 20, 20)
         
-        # WLED Settings
-        wled_title = QLabel("💻 WLED Settings")
-        wled_title.setFont(QFont("Arial", 16, QFont.Bold))
-        wled_title.setStyleSheet("""
-            color: #ffffff;
-            background-color: rgba(255, 255, 255, 0.1);
-            padding: 12px;
-            border-radius: 8px;
-            margin: 8px 0px;
+        # LED Type Selection
+        led_type_group = QGroupBox("🔌 LED Type Selection")
+        led_type_group.setFont(QFont("Arial", 16, QFont.Bold))
+        led_type_group.setStyleSheet("""
+            QGroupBox {
+                color: #ffffff;
+                border: 2px solid #404040;
+                border-radius: 12px;
+                padding-top: 15px;
+                margin-top: 10px;
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                           stop: 0 rgba(255, 255, 255, 0.08),
+                                           stop: 1 rgba(255, 255, 255, 0.03));
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 10px 0 10px;
+            }
         """)
-        layout.addWidget(wled_title)
+        
+        led_type_layout = QVBoxLayout()
+        
+        # LED Type radio buttons
+        self.led_type_group = QButtonGroup()
+        
+        self.radio_wled = QRadioButton("💻 WLED (Local Network LED Controller)")
+        self.radio_govee = QRadioButton("📱 Govee (WiFi Smart LEDs)")  
+        self.radio_hue = QRadioButton("🌈 Philips Hue (Coming Soon)")
+        
+        self.radio_hue.setEnabled(False)  # Disable until implemented
+        self.radio_hue.setStyleSheet("color: #666666;")  # Gray out disabled option
+        
+        for i, radio in enumerate([self.radio_wled, self.radio_govee, self.radio_hue]):
+            radio.setFont(QFont("Arial", 14, QFont.Bold))
+            self.led_type_group.addButton(radio, i)
+            led_type_layout.addWidget(radio)
+        
+        # Set current LED type
+        led_type_map = {"wled": 0, "govee": 1, "philips_hue": 2}
+        current_type = led_type_map.get(self.config.get("led_type", "wled"), 0)
+        self.led_type_group.button(current_type).setChecked(True)
+        
+        led_type_group.setLayout(led_type_layout)
+        layout.addWidget(led_type_group)
+        
+        # WLED Settings Group
+        self.wled_group = QGroupBox("💻 WLED Settings")
+        self.wled_group.setFont(QFont("Arial", 16, QFont.Bold))
+        self.wled_group.setStyleSheet(led_type_group.styleSheet())
+        
+        wled_layout = QVBoxLayout()
         
         # WLED IP
-        wled_layout = QHBoxLayout()
-        wled_label = QLabel("💻 WLED IP:")
-        wled_label.setFont(QFont("Arial", 14, QFont.Bold))
-        wled_label.setMinimumWidth(130)
-        wled_label.setStyleSheet("color: #ffffff; padding: 5px;")
-        self.ip_entry = QLineEdit(self.config["wled_ip"])
+        wled_ip_layout = QHBoxLayout()
+        wled_ip_label = QLabel("💻 WLED IP:")
+        wled_ip_label.setFont(QFont("Arial", 14, QFont.Bold))
+        wled_ip_label.setMinimumWidth(130)
+        wled_ip_label.setStyleSheet("color: #ffffff; padding: 5px;")
+        self.ip_entry = QLineEdit(self.config.get("wled_ip", "192.168.1.50"))
         self.ip_entry.setFont(QFont("Arial", 13))
         self.ip_entry.setPlaceholderText("192.168.1.100")
         self.ip_entry.setToolTip("Enter the IP address of your WLED device")
-        wled_layout.addWidget(wled_label)
-        wled_layout.addWidget(self.ip_entry)
-        layout.addLayout(wled_layout)
+        wled_ip_layout.addWidget(wled_ip_label)
+        wled_ip_layout.addWidget(self.ip_entry)
         
-        # Add spacing
-        layout.addSpacing(20)
+        wled_layout.addLayout(wled_ip_layout)
+        self.wled_group.setLayout(wled_layout)
+        layout.addWidget(self.wled_group)
+        
+        # Govee Settings Group
+        self.govee_group = QGroupBox("📱 Govee Settings")
+        self.govee_group.setFont(QFont("Arial", 16, QFont.Bold))
+        self.govee_group.setStyleSheet(led_type_group.styleSheet())
+        
+        govee_layout = QVBoxLayout()
+        
+        # Govee API Key
+        api_key_layout = QHBoxLayout()
+        api_key_label = QLabel("🔑 API Key:")
+        api_key_label.setFont(QFont("Arial", 14, QFont.Bold))
+        api_key_label.setMinimumWidth(130)
+        api_key_label.setStyleSheet("color: #ffffff; padding: 5px;")
+        self.govee_api_key_entry = QLineEdit(self.config.get("govee_api_key", ""))
+        self.govee_api_key_entry.setFont(QFont("Arial", 13))
+        self.govee_api_key_entry.setEchoMode(QLineEdit.Password)
+        self.govee_api_key_entry.setPlaceholderText("Your Govee API Key")
+        self.govee_api_key_entry.setToolTip("Get your API key from Govee developer portal")
+        api_key_layout.addWidget(api_key_label)
+        api_key_layout.addWidget(self.govee_api_key_entry)
+        
+        # Govee Device ID
+        device_id_layout = QHBoxLayout()
+        device_id_label = QLabel("📱 Device ID:")
+        device_id_label.setFont(QFont("Arial", 14, QFont.Bold))
+        device_id_label.setMinimumWidth(130)
+        device_id_label.setStyleSheet("color: #ffffff; padding: 5px;")
+        self.govee_device_id_entry = QLineEdit(self.config.get("govee_device_id", ""))
+        self.govee_device_id_entry.setFont(QFont("Arial", 13))
+        self.govee_device_id_entry.setPlaceholderText("AB:CD:EF:12:34:56:78:90")
+        self.govee_device_id_entry.setToolTip("Device MAC address from Govee API")
+        device_id_layout.addWidget(device_id_label)
+        device_id_layout.addWidget(self.govee_device_id_entry)
+        
+        # Govee Model
+        model_layout = QHBoxLayout()
+        model_label = QLabel("🏷️ Model:")
+        model_label.setFont(QFont("Arial", 14, QFont.Bold))
+        model_label.setMinimumWidth(130)
+        model_label.setStyleSheet("color: #ffffff; padding: 5px;")
+        self.govee_model_entry = QLineEdit(self.config.get("govee_model", ""))
+        self.govee_model_entry.setFont(QFont("Arial", 13))
+        self.govee_model_entry.setPlaceholderText("H6163")
+        self.govee_model_entry.setToolTip("Device model from Govee API")
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.govee_model_entry)
+        
+        # Get Devices button
+        get_devices_btn = QPushButton("📋 Get My Devices")
+        get_devices_btn.setFont(QFont("Arial", 12, QFont.Bold))
+        get_devices_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                           stop: 0 #9c27b0, stop: 1 #7b1fa2);
+                color: white;
+                border-radius: 8px;
+                font-weight: bold;
+                padding: 10px 20px;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                           stop: 0 #ba68c8, stop: 1 #9c27b0);
+                border: 2px solid #ce93d8;
+            }
+        """)
+        get_devices_btn.clicked.connect(self.get_govee_devices)
+        
+        govee_layout.addLayout(api_key_layout)
+        govee_layout.addLayout(device_id_layout)
+        govee_layout.addLayout(model_layout)
+        govee_layout.addWidget(get_devices_btn, alignment=Qt.AlignCenter)
+        
+        self.govee_group.setLayout(govee_layout)
+        layout.addWidget(self.govee_group)
+        
+        # Philips Hue Settings Group (placeholder)
+        self.hue_group = QGroupBox("🌈 Philips Hue Settings (Coming Soon)")
+        self.hue_group.setFont(QFont("Arial", 16, QFont.Bold))
+        self.hue_group.setStyleSheet(led_type_group.styleSheet())
+        self.hue_group.setEnabled(False)
+        
+        hue_layout = QVBoxLayout()
+        hue_placeholder = QLabel("🚧 Philips Hue integration will be added in a future update")
+        hue_placeholder.setFont(QFont("Arial", 12))
+        hue_placeholder.setStyleSheet("color: #666666; text-align: center; padding: 20px;")
+        hue_placeholder.setAlignment(Qt.AlignCenter)
+        hue_layout.addWidget(hue_placeholder)
+        
+        self.hue_group.setLayout(hue_layout)
+        layout.addWidget(self.hue_group)
         
         # Telegram Settings
-        telegram_title = QLabel("💬 Telegram Settings")
-        telegram_title.setFont(QFont("Arial", 16, QFont.Bold))
-        telegram_title.setStyleSheet("""
-            color: #ffffff;
-            background-color: rgba(255, 255, 255, 0.1);
-            padding: 12px;
-            border-radius: 8px;
-            margin: 8px 0px;
-        """)
-        layout.addWidget(telegram_title)
+        telegram_group = QGroupBox("💬 Telegram Settings")
+        telegram_group.setFont(QFont("Arial", 16, QFont.Bold))
+        telegram_group.setStyleSheet(led_type_group.styleSheet())
+        
+        telegram_layout = QVBoxLayout()
         
         # Bot Token
         token_layout = QHBoxLayout()
@@ -752,7 +942,6 @@ class RustWLEDApp(QMainWindow):
         token_layout.addWidget(token_label)
         token_layout.addWidget(self.bot_token_entry)
         token_layout.addWidget(setup_btn)
-        layout.addLayout(token_layout)
         
         # Chat ID
         chat_layout = QHBoxLayout()
@@ -766,7 +955,6 @@ class RustWLEDApp(QMainWindow):
         self.chat_id_entry.setToolTip("Channel ID (starts with -100) or personal chat ID")
         chat_layout.addWidget(chat_label)
         chat_layout.addWidget(self.chat_id_entry)
-        layout.addLayout(chat_layout)
         
         # Polling Rate
         polling_layout = QHBoxLayout()
@@ -783,25 +971,217 @@ class RustWLEDApp(QMainWindow):
         polling_layout.addWidget(polling_label)
         polling_layout.addWidget(self.polling_spin)
         polling_layout.addStretch()
-        layout.addLayout(polling_layout)
+        
+        telegram_layout.addLayout(token_layout)
+        telegram_layout.addLayout(chat_layout)
+        telegram_layout.addLayout(polling_layout)
+        
+        telegram_group.setLayout(telegram_layout)
+        layout.addWidget(telegram_group)
+        
+        # Connect LED type change to show/hide settings
+        self.led_type_group.buttonClicked.connect(self.on_led_type_changed)
+        self.on_led_type_changed()  # Set initial visibility
+        
+        # Update action visibility after LED type group is set up
+        self.update_action_visibility()
         
         layout.addStretch()
-        settings_tab.setLayout(layout)
+        content_widget.setLayout(layout)
+        scroll_area.setWidget(content_widget)
+        
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(scroll_area)
+        settings_tab.setLayout(main_layout)
+        
         self.tab_widget.addTab(settings_tab, "⚙️ Settings")
+    
+    def on_led_type_changed(self):
+        """Handle LED type radio button changes"""
+        selected_id = self.led_type_group.checkedId()
+        
+        # Show/hide appropriate settings groups
+        self.wled_group.setVisible(selected_id == 0)  # WLED
+        self.govee_group.setVisible(selected_id == 1)  # Govee
+        self.hue_group.setVisible(selected_id == 2)    # Philips Hue
+        
+        # Update action visibility in control tab
+        self.update_action_visibility()
+    
+    def update_action_visibility(self):
+        """Update visibility of action radio buttons based on selected LED type"""
+        if not hasattr(self, 'led_type_group'):
+            return  # Not initialized yet
+        
+        selected_id = self.led_type_group.checkedId()
+        
+        # All LED types support these basic actions
+        self.radio_on.setVisible(True)
+        self.radio_off.setVisible(True)
+        self.radio_color.setVisible(True)
+        
+        # WLED-specific actions
+        if selected_id == 0:  # WLED
+            self.radio_effect.setVisible(True)
+            self.radio_preset.setVisible(True)
+            self.radio_scene.setVisible(False)
+            self.radio_brightness.setVisible(False)
+            self.radio_effect.setText("✨ Set Effect (WLED)")
+            self.radio_preset.setText("🎭 Run Preset (WLED)")
+        
+        # Govee-specific actions
+        elif selected_id == 1:  # Govee
+            self.radio_effect.setVisible(False)
+            self.radio_preset.setVisible(False)
+            self.radio_scene.setVisible(True)
+            self.radio_brightness.setVisible(True)
+        
+        # Philips Hue actions (future)
+        elif selected_id == 2:  # Philips Hue
+            self.radio_effect.setVisible(False)
+            self.radio_preset.setVisible(False)
+            self.radio_scene.setVisible(False)
+            self.radio_brightness.setVisible(True)
+        
+        # Ensure a valid action is selected
+        if not self.action_group.checkedButton().isVisible():
+            # If current selection is hidden, default to "on"
+            self.radio_on.setChecked(True)
+    
+    
+    def get_govee_devices(self):
+        """Get and display available Govee devices"""
+        api_key = self.govee_api_key_entry.text().strip()
+        if not api_key:
+            QMessageBox.warning(self, "Missing API Key", 
+                              "Please enter your Govee API key first.")
+            return
+        
+        try:
+            # Create a temporary Govee controller to get devices
+            from led_controllers import GoveeController
+            temp_controller = GoveeController(api_key, "", "")
+            devices = temp_controller.get_devices()
+            
+            if not devices:
+                QMessageBox.information(self, "No Devices", 
+                                      "No Govee devices found. Make sure your API key is correct.")
+                return
+            
+            # Create a dialog to show devices
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Available Govee Devices")
+            dialog.setFixedSize(600, 400)
+            
+            layout = QVBoxLayout()
+            
+            info_label = QLabel("Select a device to auto-fill the settings:")
+            info_label.setFont(QFont("Arial", 12, QFont.Bold))
+            layout.addWidget(info_label)
+            
+            # Create list of devices
+            device_list = QTextEdit()
+            device_list.setReadOnly(True)
+            device_list.setFont(QFont("Consolas", 10))
+            
+            device_text = ""
+            for i, device in enumerate(devices):
+                device_text += f"Device {i+1}:\n"
+                device_text += f"  Name: {device.get('deviceName', 'Unknown')}\n"
+                device_text += f"  Device ID: {device.get('device', 'N/A')}\n"
+                device_text += f"  Model: {device.get('model', 'N/A')}\n"
+                device_text += f"  Controllable: {'Yes' if device.get('controllable') else 'No'}\n"
+                device_text += f"  Retrievable: {'Yes' if device.get('retrievable') else 'No'}\n"
+                device_text += "  Capabilities: " + ", ".join(device.get('supportCmds', [])) + "\n"
+                device_text += "\n"
+            
+            device_list.setPlainText(device_text)
+            layout.addWidget(device_list)
+            
+            # Buttons
+            button_layout = QHBoxLayout()
+            
+            for i, device in enumerate(devices):
+                if device.get('controllable'):  # Only show controllable devices
+                    btn = QPushButton(f"Use Device {i+1}")
+                    btn.clicked.connect(lambda checked, dev=device: self.select_govee_device(dev, dialog))
+                    button_layout.addWidget(btn)
+            
+            close_btn = QPushButton("Close")
+            close_btn.clicked.connect(dialog.accept)
+            button_layout.addWidget(close_btn)
+            
+            layout.addLayout(button_layout)
+            dialog.setLayout(layout)
+            dialog.exec()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to get Govee devices: {str(e)}")
+    
+    def select_govee_device(self, device, dialog):
+        """Select and populate a Govee device"""
+        self.govee_device_id_entry.setText(device.get('device', ''))
+        self.govee_model_entry.setText(device.get('model', ''))
+        dialog.accept()
+        
+        # Show success message
+        QMessageBox.information(self, "Device Selected", 
+                              f"Selected: {device.get('deviceName', 'Unknown Device')}\n"
+                              f"Model: {device.get('model', 'N/A')}")
+    
     
     def load_config(self):
         try:
             with open(CONFIG_FILE, "r") as f:
                 self.config = json.load(f)
             print(f"[INFO] Loaded config from {CONFIG_FILE}")
+            
+            # Migrate old config format to new format
+            if "led_type" not in self.config:
+                print("[INFO] Migrating old config format...")
+                self.config["led_type"] = "wled"  # Default to WLED for existing users
+                
+                # Add new fields with defaults
+                new_fields = {
+                    "scene": "0",
+                    "brightness": "100",
+                    "govee_api_key": "",
+                    "govee_device_id": "",
+                    "govee_model": "",
+                    "hue_bridge_ip": "",
+                    "hue_username": ""
+                }
+                
+                for field, default_value in new_fields.items():
+                    if field not in self.config:
+                        self.config[field] = default_value
+                
+                # Save the migrated config
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump(self.config, f, indent=4)
+                print("[INFO] Config migration completed!")
+                
         except:
             print(f"[INFO] Config file not found. Creating default config...")
             self.config = {
-                "wled_ip": "192.168.1.50",
+                "led_type": "wled",  # "wled", "govee", or "philips_hue"
                 "action": "on",
                 "color": "#ffffff",
                 "effect": "0",
                 "preset": "0",
+                "scene": "0",  # For Govee scenes
+                "brightness": "100",  # For Govee/Hue
+                # WLED settings
+                "wled_ip": "192.168.1.50",
+                # Govee settings
+                "govee_api_key": "",
+                "govee_device_id": "",
+                "govee_model": "",
+                # Philips Hue settings (for future)
+                "hue_bridge_ip": "",
+                "hue_username": "",
+                # Telegram settings
                 "telegram_bot_token": "",
                 "telegram_chat_id": "",
                 "last_message_id": 0,
@@ -816,24 +1196,37 @@ class RustWLEDApp(QMainWindow):
         old_bot_token = self.config.get("telegram_bot_token", "")
         old_chat_id = self.config.get("telegram_chat_id", "")
         
+        # Get selected LED type
+        led_type_map = {0: "wled", 1: "govee", 2: "philips_hue"}
+        self.config["led_type"] = led_type_map.get(self.led_type_group.checkedId(), "wled")
+        
+        # Save LED-specific settings
         self.config["wled_ip"] = self.ip_entry.text()
+        self.config["govee_api_key"] = self.govee_api_key_entry.text()
+        self.config["govee_device_id"] = self.govee_device_id_entry.text()
+        self.config["govee_model"] = self.govee_model_entry.text()
+        
+        # Save Telegram settings
         self.config["telegram_bot_token"] = self.bot_token_entry.text()
         self.config["telegram_chat_id"] = self.chat_id_entry.text()
         self.config["polling_rate"] = self.polling_spin.value()
         
         # Get selected action
-        action_map = {0: "on", 1: "off", 2: "color", 3: "effect", 4: "preset"}
+        action_map = {0: "on", 1: "off", 2: "color", 3: "effect", 4: "preset", 5: "scene", 6: "brightness"}
         self.config["action"] = action_map.get(self.action_group.checkedId(), "on")
         
+        # Save action parameters
         self.config["color"] = self.current_color.name()
         self.config["effect"] = str(self.effect_spin.value())
         self.config["preset"] = str(self.preset_spin.value())
-        self.config["polling_rate"] = self.polling_spin.value()
+        self.config["scene"] = str(self.scene_spin.value())
+        self.config["brightness"] = str(self.brightness_spin.value())
         
         with open(CONFIG_FILE, "w") as f:
             json.dump(self.config, f, indent=4)
         
-        print(f"[INFO] Settings saved: IP={self.config['wled_ip']}, Action={self.config['action']}")
+        led_type = self.config.get("led_type", "wled")
+        print(f"[INFO] Settings saved: LED Type={led_type}, Action={self.config['action']}")
         self.update_status("✓ Settings Saved Successfully!", "green")
         
         # Visual feedback - briefly highlight save button
@@ -890,7 +1283,7 @@ class RustWLEDApp(QMainWindow):
         dialog.exec()
     
     def test_wled(self):
-        print("[INFO] Testing WLED connection...")
+        print("[INFO] Testing LED connection...")
         
         # Visual feedback - show testing state
         sender = self.sender()
@@ -899,15 +1292,22 @@ class RustWLEDApp(QMainWindow):
         sender.setEnabled(False)
         
         # Update config from UI without saving to file or restarting telegram
+        led_type_map = {0: "wled", 1: "govee", 2: "philips_hue"}
+        self.config["led_type"] = led_type_map.get(self.led_type_group.checkedId(), "wled")
         self.config["wled_ip"] = self.ip_entry.text()
+        self.config["govee_api_key"] = self.govee_api_key_entry.text()
+        self.config["govee_device_id"] = self.govee_device_id_entry.text()
+        self.config["govee_model"] = self.govee_model_entry.text()
         self.config["polling_rate"] = self.polling_spin.value()
-        action_map = {0: "on", 1: "off", 2: "color", 3: "effect", 4: "preset"}
+        action_map = {0: "on", 1: "off", 2: "color", 3: "effect", 4: "preset", 5: "scene", 6: "brightness"}
         self.config["action"] = action_map.get(self.action_group.checkedId(), "on")
         self.config["color"] = self.current_color.name()
         self.config["effect"] = str(self.effect_spin.value())
         self.config["preset"] = str(self.preset_spin.value())
+        self.config["scene"] = str(self.scene_spin.value())
+        self.config["brightness"] = str(self.brightness_spin.value())
         
-        self.trigger_wled()
+        self.trigger_led()
         
         # Reset button after 2 seconds
         QTimer.singleShot(2000, lambda: [
@@ -915,44 +1315,67 @@ class RustWLEDApp(QMainWindow):
             sender.setEnabled(True)
         ])
     
-    def trigger_wled(self):
-        ip = self.config["wled_ip"]
-        action = self.config["action"]
-        url = f"http://{ip}/json/state"
+    def trigger_led(self):
+        """Trigger LED action using the appropriate controller"""
+        led_type = self.config.get("led_type", "wled")
+        action = self.config.get("action", "on")
+        
+        print(f"[LED] Triggering {led_type.upper()} action: {action}")
         
         try:
-            if action == "on":
-                payload = {"on": True}
-                print(f"[WLED] Turning ON -> {url}")
-                requests.post(url, json=payload, timeout=5)
-            elif action == "off":
-                payload = {"on": False}
-                print(f"[WLED] Turning OFF -> {url}")
-                requests.post(url, json=payload, timeout=5)
-            elif action == "color":
-                hex_color = self.config["color"].lstrip("#")
-                r = int(hex_color[0:2], 16)
-                g = int(hex_color[2:4], 16)
-                b = int(hex_color[4:6], 16)
-                payload = {"on": True, "seg": [{"col": [[r, g, b]]}]}
-                print(f"[WLED] Setting color RGB({r},{g},{b}) -> {url}")
-                requests.post(url, json=payload, timeout=5)
-            elif action == "effect":
-                fx = int(self.config["effect"])
-                payload = {"on": True, "seg": [{"fx": fx}]}
-                print(f"[WLED] Setting effect #{fx} -> {url}")
-                requests.post(url, json=payload, timeout=5)
-            elif action == "preset":
-                p = int(self.config["preset"])
-                payload = {"ps": p}
-                print(f"[WLED] Running preset #{p} -> {url}")
-                requests.post(url, json=payload, timeout=5)
+            # Create the appropriate LED controller
+            controller = create_led_controller(led_type, self.config)
+            if not controller:
+                self.update_status("❌ Error: LED controller not configured properly", "red")
+                return
             
-            print(f"[WLED] ✓ Success!")
-            self.update_status("✓ WLED Triggered Successfully!", "green")
+            # Test connection first
+            if not controller.test_connection():
+                self.update_status("❌ Error: Cannot connect to LED device", "red")
+                return
+            
+            # Execute the action
+            success = False
+            if action == "on":
+                success = controller.turn_on()
+                print(f"[LED] Turn ON result: {success}")
+            elif action == "off":
+                success = controller.turn_off()
+                print(f"[LED] Turn OFF result: {success}")
+            elif action == "color":
+                color = self.config.get("color", "#ffffff")
+                success = controller.set_color(color)
+                print(f"[LED] Set color {color} result: {success}")
+            elif action == "brightness" and hasattr(controller, 'set_brightness'):
+                brightness = int(self.config.get("brightness", 100))
+                success = controller.set_brightness(brightness)
+                print(f"[LED] Set brightness {brightness}% result: {success}")
+            elif action == "effect" and hasattr(controller, 'set_effect'):
+                effect = int(self.config.get("effect", 0))
+                success = controller.set_effect(effect)
+                print(f"[LED] Set effect #{effect} result: {success}")
+            elif action == "preset" and hasattr(controller, 'set_preset'):
+                preset = int(self.config.get("preset", 0))
+                success = controller.set_preset(preset)
+                print(f"[LED] Set preset #{preset} result: {success}")
+            elif action == "scene" and hasattr(controller, 'set_scene'):
+                scene = int(self.config.get("scene", 0))
+                success = controller.set_scene(scene)
+                print(f"[LED] Set scene #{scene} result: {success}")
+            else:
+                print(f"[LED] Action '{action}' not supported for {led_type}")
+                self.update_status(f"❌ Error: Action '{action}' not supported for {led_type.upper()}", "red")
+                return
+            
+            if success:
+                print(f"[LED] ✓ {led_type.upper()} action successful!")
+                self.update_status(f"✓ {led_type.upper()} {action.title()} Successful!", "green")
+            else:
+                print(f"[LED] ❌ {led_type.upper()} action failed!")
+                self.update_status(f"❌ {led_type.upper()} {action.title()} Failed!", "red")
         
         except Exception as e:
-            print(f"[ERROR] WLED request failed: {str(e)}")
+            print(f"[ERROR] LED control failed: {str(e)}")
             self.update_status(f"❌ Error: {str(e)[:50]}", "red")
     
     def update_status(self, message, color):
@@ -993,7 +1416,7 @@ class RustWLEDApp(QMainWindow):
     def start_telegram_worker(self):
         self.telegram_worker = TelegramWorker(self.config)
         self.telegram_worker.status_update.connect(self.update_status)
-        self.telegram_worker.trigger_callback = self.trigger_wled
+        self.telegram_worker.trigger_callback = self.trigger_led
         self.telegram_worker.start()
     
     def restart_telegram_worker(self):
