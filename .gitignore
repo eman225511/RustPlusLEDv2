@@ -212,6 +212,16 @@ Thumbs.db
 *.dmg
 build/
 dist/
+release/
+
+# PyInstaller build files
+*.spec
+__pycache__/
+*.pyc
+
+# Build artifacts
+*.manifest
+*.spec
 
 # Test configuration files
 test_config.json
