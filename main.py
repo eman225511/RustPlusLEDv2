@@ -637,7 +637,9 @@ class RustWLEDApp(QMainWindow):
         
         # Set current action
         action_map = {"on": 0, "off": 1, "color": 2, "effect": 3, "preset": 4, "scene": 5, "brightness": 6}
-        self.action_group.button(action_map.get(self.config["action"], 0)).setChecked(True)
+        current_action = self.config.get("action", "on")
+        action_index = action_map.get(current_action, 0)
+        self.action_group.button(action_index).setChecked(True)
         
         layout.addLayout(actions_layout)
         
@@ -1006,8 +1008,8 @@ class RustWLEDApp(QMainWindow):
         self.led_type_group.buttonClicked.connect(self.on_led_type_changed)
         self.on_led_type_changed()  # Set initial visibility
         
-        # Update action visibility after LED type group is set up
-        self.update_action_visibility()
+        # Update action visibility after UI is fully rendered
+        QTimer.singleShot(100, self.update_action_visibility)
         
         layout.addStretch()
         content_widget.setLayout(layout)
@@ -1184,9 +1186,29 @@ class RustWLEDApp(QMainWindow):
             self.radio_scene.setVisible(False)
             self.radio_brightness.setVisible(True)
         
-        # Ensure a valid action is selected
-        if not self.action_group.checkedButton().isVisible():
-            # If current selection is hidden, default to "on"
+        # Ensure a valid action is selected based on LED type
+        current_button = self.action_group.checkedButton()
+        if current_button:
+            # Check if the action is compatible with the current LED type
+            should_reset = False
+            
+            if selected_id == 0:  # WLED
+                # WLED doesn't support scene
+                if current_button in [self.radio_scene]:
+                    should_reset = True
+            elif selected_id == 1:  # Govee
+                # Govee doesn't support WLED-specific effect/preset
+                if current_button in [self.radio_effect, self.radio_preset]:
+                    should_reset = True
+            elif selected_id == 2:  # Philips Hue
+                # Hue doesn't support WLED or Govee specific actions
+                if current_button in [self.radio_effect, self.radio_preset, self.radio_scene]:
+                    should_reset = True
+            
+            if should_reset:
+                self.radio_on.setChecked(True)
+        else:
+            # If no button is selected at all, default to "on"
             self.radio_on.setChecked(True)
     
     
