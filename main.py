@@ -3,14 +3,15 @@ import time
 import threading
 import requests
 import json
+import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                                QRadioButton, QButtonGroup, QSpinBox, QFrame,
                                QDialog, QTextEdit, QColorDialog, QMessageBox,
                                QTabWidget, QProgressBar, QToolTip, QComboBox,
                                QGroupBox, QScrollArea)
-from PySide6.QtCore import Qt, Signal, QThread, QTimer, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QColor, QIcon
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QPropertyAnimation, QEasingCurve, QObject
+from PySide6.QtGui import QFont, QColor, QIcon, QTextCursor
 from telegram import Bot
 from telegram.error import TelegramError
 import asyncio
@@ -18,9 +19,21 @@ from led_controllers import create_led_controller, GoveeController
 
 CONFIG_FILE = "config.json"
 
+class EmittingStream(QObject):
+    """Stream that emits signals for GUI logging"""
+    textWritten = Signal(str)
+
+    def write(self, text):
+        if text.strip():  # Only emit non-empty strings
+            self.textWritten.emit(text.strip())
+
+    def flush(self):
+        pass
+
 class TelegramWorker(QThread):
     """Worker thread for polling Telegram"""
     status_update = Signal(str, str)  # message, color
+    log_message = Signal(str)  # for logging to GUI
     
     def __init__(self, config):
         super().__init__()
@@ -29,7 +42,7 @@ class TelegramWorker(QThread):
         self.trigger_callback = None
         
     def run(self):
-        print("[TELEGRAM] Starting Telegram bot connection...")
+        self.log_message.emit("[TELEGRAM] Starting Telegram bot connection...")
         self.status_update.emit("Connecting to Telegram...", "orange")
         
         bot_token = self.config.get("telegram_bot_token", "")
@@ -37,14 +50,14 @@ class TelegramWorker(QThread):
         
         if not bot_token or not chat_id:
             error_msg = "ERROR: Telegram bot token or chat ID not set!"
-            print(f"[TELEGRAM] {error_msg}")
+            self.log_message.emit(f"[TELEGRAM] {error_msg}")
             self.status_update.emit(error_msg, "red")
             return
         
         # Validate bot token format
         if ":" not in bot_token or len(bot_token.split(":")) != 2:
             error_msg = "ERROR: Invalid bot token format! Should be like: 123456789:ABCdefGHI..."
-            print(f"[TELEGRAM] {error_msg}")
+            self.log_message.emit(f"[TELEGRAM] {error_msg}")
             self.status_update.emit(error_msg, "red")
             return
         
@@ -71,7 +84,7 @@ class TelegramWorker(QThread):
                 
         except asyncio.TimeoutError:
             error_msg = "ERROR: Connection timed out! Check your internet connection."
-            print(f"[TELEGRAM] {error_msg}")
+            self.log_message.emit(f"[TELEGRAM] {error_msg}")
             self.status_update.emit(error_msg, "red")
             return
         except TelegramError as e:
@@ -83,16 +96,16 @@ class TelegramWorker(QThread):
                 error_msg = "ERROR: Bot access forbidden! Make sure bot is active."
             else:
                 error_msg = f"Telegram error: {str(e)}"
-            print(f"[TELEGRAM] {error_msg}")
+            self.log_message.emit(f"[TELEGRAM] {error_msg}")
             self.status_update.emit(error_msg, "red")
             return
         except Exception as e:
             error_msg = f"Connection failed: {str(e)}"
-            print(f"[TELEGRAM] {error_msg}")
+            self.log_message.emit(f"[TELEGRAM] {error_msg}")
             self.status_update.emit(error_msg, "red")
             return
 
-        print(f"[TELEGRAM] Starting polling loop (every {self.config.get('polling_rate', 2)} seconds...)")
+        self.log_message.emit(f"[TELEGRAM] Starting polling loop (every {self.config.get('polling_rate', 2)} seconds...)")
         last_update_id = 0
         
         while self.running:
@@ -168,14 +181,20 @@ class TelegramWorker(QThread):
                 print(f"[ERROR] Failed to poll Telegram: {str(e)}")
                 self.status_update.emit(f"Error polling: {str(e)[:50]}", "red")
 
-            # Use configurable polling rate
-            time.sleep(self.config.get("polling_rate", 2))
+            # Use configurable polling rate with interruptible sleep
+            sleep_time = self.config.get("polling_rate", 2)
+            for i in range(sleep_time * 10):  # Check every 0.1 seconds
+                if not self.running:
+                    break
+                time.sleep(0.1)
         
         # Clean up the event loop when done
         loop.close()
     
     def stop(self):
         self.running = False
+        # Force quit to avoid waiting for sleep
+        self.quit()
 
 
 class SetupDialog(QDialog):
@@ -285,6 +304,8 @@ class RustWLEDApp(QMainWindow):
         self.load_config()
         self.telegram_worker = None
         self.current_color = QColor(self.config["color"])
+        self.last_log_message = ""
+        self.duplicate_count = 0
         
         self.setWindowTitle("Rust+ WLED Trigger")
         self.setFixedSize(850, 950)
@@ -427,6 +448,7 @@ class RustWLEDApp(QMainWindow):
         """)
         
         self.init_ui()
+        self.setup_logging()
         self.start_telegram_worker()
         
     def init_ui(self):
@@ -489,6 +511,7 @@ class RustWLEDApp(QMainWindow):
         # Create tabs
         self.create_main_tab()
         self.create_settings_tab()
+        self.create_logs_tab()
         
         # Connect LED type change to update action visibility (after both tabs are created)
         self.led_type_group.buttonClicked.connect(self.update_action_visibility)
@@ -997,6 +1020,123 @@ class RustWLEDApp(QMainWindow):
         
         self.tab_widget.addTab(settings_tab, "⚙️ Settings")
     
+    def create_logs_tab(self):
+        """Create the logs tab"""
+        logs_tab = QWidget()
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title = QLabel("📜 Application Logs")
+        title.setFont(QFont("Arial", 16, QFont.Bold))
+        title.setStyleSheet("color: #ffffff; margin-bottom: 10px;")
+        layout.addWidget(title)
+        
+        # Logs text area
+        self.logs_text = QTextEdit()
+        self.logs_text.setReadOnly(True)
+        self.logs_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1a1a1a;
+                border: 2px solid #444444;
+                border-radius: 8px;
+                color: #ffffff;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10pt;
+                padding: 10px;
+            }
+        """)
+        layout.addWidget(self.logs_text)
+        
+        # Clear logs button
+        clear_btn = QPushButton("🗑️ Clear Logs")
+        clear_btn.setFixedHeight(40)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                           stop: 0 #ff6b6b, stop: 1 #e74c3c);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 11pt;
+                font-weight: bold;
+                border: 2px solid transparent;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                           stop: 0 #ff8a80, stop: 1 #ff5252);
+                border: 2px solid #ff9999;
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
+                                           stop: 0 #c62828, stop: 1 #b71c1c);
+            }
+        """)
+        clear_btn.clicked.connect(self.clear_logs)
+        layout.addWidget(clear_btn)
+        
+        logs_tab.setLayout(layout)
+        self.tab_widget.addTab(logs_tab, "📜 Logs")
+    
+    def setup_logging(self):
+        """Setup logging to redirect stdout to the logs tab"""
+        self.log_stream = EmittingStream()
+        self.log_stream.textWritten.connect(self.append_log)
+        
+        # Redirect stdout to our custom stream
+        sys.stdout = self.log_stream
+        
+        # Initial log message
+        self.append_log("Application started - Logging initialized")
+    
+    def append_log(self, text):
+        """Append text to the logs tab with duplicate handling"""
+        if hasattr(self, 'logs_text'):
+            # Handle duplicate messages
+            if text == self.last_log_message:
+                self.duplicate_count += 1
+                # Move to end and select the entire last line
+                cursor = self.logs_text.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                cursor.movePosition(QTextCursor.StartOfLine, QTextCursor.KeepAnchor)
+                
+                # Replace the entire line with updated count
+                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                formatted_text = f"[{timestamp}] {text} (x{self.duplicate_count + 1})"
+                cursor.removeSelectedText()
+                cursor.insertText(formatted_text)
+                
+                self.logs_text.setTextCursor(cursor)
+                self.logs_text.ensureCursorVisible()
+                return
+            
+            # Reset duplicate tracking for new message
+            self.last_log_message = text
+            self.duplicate_count = 0
+            
+            cursor = self.logs_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            
+            # Add timestamp
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+            formatted_text = f"[{timestamp}] {text}"
+            
+            cursor.insertText(formatted_text + "\n")
+            self.logs_text.setTextCursor(cursor)
+            
+            # Auto-scroll to bottom
+            self.logs_text.ensureCursorVisible()
+    
+    def clear_logs(self):
+        """Clear the logs text area"""
+        if hasattr(self, 'logs_text'):
+            self.logs_text.clear()
+            # Reset duplicate tracking
+            self.last_log_message = ""
+            self.duplicate_count = 0
+            self.append_log("Logs cleared")
+    
     def on_led_type_changed(self):
         """Handle LED type radio button changes"""
         selected_id = self.led_type_group.checkedId()
@@ -1230,7 +1370,8 @@ class RustWLEDApp(QMainWindow):
         self.update_status("✓ Settings Saved Successfully!", "green")
         
         # Visual feedback - briefly highlight save button
-        self.sender().setStyleSheet("""
+        save_button = self.sender()
+        save_button.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
                                            stop: 0 #4caf50, stop: 1 #388e3c);
@@ -1243,7 +1384,7 @@ class RustWLEDApp(QMainWindow):
         """)
         
         # Reset button style after 1 second
-        QTimer.singleShot(1000, lambda: self.sender().setStyleSheet("""
+        QTimer.singleShot(1000, lambda: save_button.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1: 0, y1: 0, x2: 0, y2: 1,
                                            stop: 0 #2196f3, stop: 1 #1976d2);
@@ -1416,6 +1557,7 @@ class RustWLEDApp(QMainWindow):
     def start_telegram_worker(self):
         self.telegram_worker = TelegramWorker(self.config)
         self.telegram_worker.status_update.connect(self.update_status)
+        self.telegram_worker.log_message.connect(self.append_log)
         self.telegram_worker.trigger_callback = self.trigger_led
         self.telegram_worker.start()
     
